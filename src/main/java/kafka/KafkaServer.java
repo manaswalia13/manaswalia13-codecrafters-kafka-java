@@ -1,9 +1,9 @@
+package kafka;
+
 import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
 import java.net.ServerSocket;
 import java.net.Socket;
-import java.nio.ByteBuffer;
+import java.util.stream.IntStream;
 
 public class KafkaServer {
     private final int port;
@@ -12,90 +12,42 @@ public class KafkaServer {
         this.port = port;
     }
 
-    public void start() throws IOException {
+    public void start() {
+        System.err.println("[INFO] Servidor Kafka iniciado na porta " + port);
+
         try (ServerSocket serverSocket = new ServerSocket(port)) {
-            while (true) {
-                Socket clientSocket = serverSocket.accept();
-                handleClient(clientSocket); // Serial Requests: handle same client until disconnect
-            }
-        }
-    }
+            serverSocket.setReuseAddress(true);
+            System.out.println("[INFO] Aguardando conexão]");
+            try (Socket clientSocket = serverSocket.accept()) {
+                System.out.println("[INFO] Cliente conectado!");
 
-    private void handleClient(Socket clientSocket) throws IOException {
-        try (InputStream input = clientSocket.getInputStream();
-             OutputStream output = clientSocket.getOutputStream()) {
+                while (!clientSocket.isClosed()) {
+                    try {
+                        KafkaRequest request = new KafkaRequest(clientSocket.getInputStream());
+                        byte[] response = KafkaResponseBuilder.buildResponse(request);
+                        System.out.println("[INFO] Request recebida: \n" + request.toString());
+                        System.out.println("[INFO] Bytes da resposta gerada: \n");
+                        System.out.print("[HEX]");
+                        IntStream.range(0, response.length)
+                                .mapToObj(i -> String.format("%02X", response[i]))
+                                .forEach(hex -> System.out.print(hex + " "));
+                        System.out.println("");
 
-            while (true) {
-                // Read request size (4 bytes)
-                byte[] sizeBytes = input.readNBytes(4);
-                if (sizeBytes.length < 4) {
-                    break; // Client closed connection
+                        clientSocket.getOutputStream().write(response);
+                        clientSocket.getOutputStream().flush();
+
+                    } catch (IOException e) {
+                        System.out.println("[ERRO] Erro ao enviar response para a requisição");
+                        System.out.println("[ERRO] " + e.getMessage());
+                    }
                 }
-
-                int requestSize = ByteBuffer.wrap(sizeBytes).getInt();
-
-                // Read request bytes
-                byte[] requestBytes = input.readNBytes(requestSize);
-                if (requestBytes.length < requestSize) {
-                    break; // Incomplete request
-                }
-
-                // Process and get response
-                byte[] response = processRequest(requestBytes);
-
-                // Send size + response
-                output.write(ByteBuffer.allocate(4).putInt(response.length).array());
-                output.write(response);
-                output.flush();
+            } catch (IOException e) {
+                System.out.println("[ERRO] Erro ao aceitar conexão:");
+                System.out.println("[ERRO] " + e.getMessage());
             }
+        } catch (IOException e) {
+            System.out.println("[ERRO] Erro ao iniciar o servidor.");
+            System.out.println("[ERRO] " + e.getMessage());
         }
     }
-
-    private byte[] processRequest(byte[] requestBytes) {
-        ByteBuffer buffer = ByteBuffer.wrap(requestBytes);
-
-        // Kafka request header: ApiKey (short), ApiVersion (short), CorrelationId (int)
-        short apiKey = buffer.getShort();
-        short apiVersion = buffer.getShort();
-        int correlationId = buffer.getInt();
-
-        if (apiKey == 18) { // ApiVersions
-            return buildApiVersionsResponse(correlationId, apiVersion);
-        }
-
-        // Unknown API → empty response
-        return new byte[0];
-    }
-
-    private byte[] buildApiVersionsResponse(int correlationId, short requestApiVersion) {
-        // Kafka ErrorCode 35 = UNSUPPORTED_VERSION
-        short errorCode = (requestApiVersion > 4) ? (short) 35 : (short) 0;
-
-        ByteBuffer body = ByteBuffer.allocate(256);
-
-        // CorrelationId
-        body.putInt(correlationId);
-
-        // ErrorCode
-        body.putShort(errorCode);
-
-        // ApiVersions array length = 1
-        body.put((byte) 1);
-
-        // ApiKey = 18
-        body.putShort((short) 18);
-
-        // MinVersion = 0, MaxVersion = 4
-        body.putShort((short) 0);
-        body.putShort((short) 4);
-
-        // Tag buffer (flexible versions) = 0
-        body.put((byte) 0);
-
-        body.flip();
-        byte[] responseBytes = new byte[body.remaining()];
-        body.get(responseBytes);
-
-        return responseBytes;
-    }
-}
+  }
