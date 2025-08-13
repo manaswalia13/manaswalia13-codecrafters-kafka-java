@@ -16,7 +16,7 @@ public class KafkaServer {
         try (ServerSocket serverSocket = new ServerSocket(port)) {
             while (true) {
                 Socket clientSocket = serverSocket.accept();
-                new Thread(() -> handleClient(clientSocket)).start(); // handle multiple clients
+                handleClient(clientSocket);
             }
         }
     }
@@ -27,21 +27,17 @@ public class KafkaServer {
             OutputStream output = clientSocket.getOutputStream()
         ) {
             while (true) {
-                // Read 4-byte frame size
                 byte[] sizeBytes = input.readNBytes(4);
                 if (sizeBytes.length < 4) break;
 
                 int requestSize = ByteBuffer.wrap(sizeBytes).getInt();
                 if (requestSize <= 0) break;
 
-                // Read request payload
                 byte[] requestBytes = input.readNBytes(requestSize);
                 if (requestBytes.length < requestSize) break;
 
-                // Process & respond
                 byte[] response = processRequest(requestBytes);
 
-                // Send length + payload
                 output.write(ByteBuffer.allocate(4).putInt(response.length).array());
                 output.write(response);
                 output.flush();
@@ -72,39 +68,29 @@ public class KafkaServer {
     private byte[] buildApiVersionsResponse(int correlationId, short requestApiVersion) {
         short errorCode = (requestApiVersion > 4) ? (short) 35 : (short) 0;
 
-        /*
-         * ApiVersionsResponse v3 format:
-         * int32 correlationId
-         * int16 errorCode
-         * int32 array_length
-         *   int16 apiKey
-         *   int16 minVersion
-         *   int16 maxVersion
-         * int32 throttle_time_ms
-         */
-        ByteBuffer body = ByteBuffer.allocate(4 + 2 + 4 + 2 + 2 + 2 + 4);
-        body.putInt(correlationId);
-        body.putShort(errorCode);
+        ByteBuffer body = ByteBuffer.allocate(18);
+        body.putInt(correlationId);       // 4 bytes
+        body.putShort(errorCode);         // 2 bytes
 
-        body.putInt(1);               // array length = 1 (int32)
-        body.putShort((short) 18);    // ApiKey
-        body.putShort((short) 0);     // MinVersion
-        body.putShort((short) 4);     // MaxVersion
+        body.put((byte) 1);               // ApiVersions array length
+        body.putShort((short) 18);        // ApiKey
+        body.putShort((short) 0);         // MinVersion
+        body.putShort((short) 4);         // MaxVersion
 
-        body.putInt(0);               // throttle_time_ms = 0
+        body.putInt(0);                   // throttle_time_ms
+        body.put((byte) 0);               // tagged fields byte
 
-        body.flip();
+        body.flip();  // Prepare buffer for reading
         byte[] responseBytes = new byte[body.remaining()];
         body.get(responseBytes);
         return responseBytes;
     }
 
     private byte[] buildErrorResponse(int correlationId) {
-        // Minimal error frame for unknown API
-        ByteBuffer body = ByteBuffer.allocate(4 + 2 + 4); // correlationId + errorCode + array length
+        ByteBuffer body = ByteBuffer.allocate(7);
         body.putInt(correlationId);
-        body.putShort((short) 44); // UNKNOWN_API_KEY
-        body.putInt(0);            // No ApiVersions entries
+        body.putShort((short) 44); // UNKNOWN_API_KEY error code
+        body.put((byte) 0);        // empty ApiVersions array
         body.flip();
         byte[] responseBytes = new byte[body.remaining()];
         body.get(responseBytes);
