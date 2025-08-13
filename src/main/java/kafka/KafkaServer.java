@@ -16,7 +16,7 @@ public class KafkaServer {
         try (ServerSocket serverSocket = new ServerSocket(port)) {
             while (true) {
                 Socket clientSocket = serverSocket.accept();
-                handleClient(clientSocket);
+                new Thread(() -> handleClient(clientSocket)).start(); // handle multiple clients
             }
         }
     }
@@ -27,18 +27,21 @@ public class KafkaServer {
             OutputStream output = clientSocket.getOutputStream()
         ) {
             while (true) {
+                // Read 4-byte frame size
                 byte[] sizeBytes = input.readNBytes(4);
                 if (sizeBytes.length < 4) break;
 
                 int requestSize = ByteBuffer.wrap(sizeBytes).getInt();
                 if (requestSize <= 0) break;
 
+                // Read request payload
                 byte[] requestBytes = input.readNBytes(requestSize);
                 if (requestBytes.length < requestSize) break;
 
+                // Process & respond
                 byte[] response = processRequest(requestBytes);
 
-                // Write frame length + response
+                // Send length + payload
                 output.write(ByteBuffer.allocate(4).putInt(response.length).array());
                 output.write(response);
                 output.flush();
@@ -70,27 +73,26 @@ public class KafkaServer {
         short errorCode = (requestApiVersion > 4) ? (short) 35 : (short) 0;
 
         /*
-         * ApiVersionsResponse v3/v4 format:
+         * ApiVersionsResponse v3 format:
          * int32 correlationId
          * int16 errorCode
-         * array[ApiKeys]
+         * int32 array_length
+         *   int16 apiKey
+         *   int16 minVersion
+         *   int16 maxVersion
          * int32 throttle_time_ms
-         * byte tagged_fields
-         * Total = 18 bytes for one ApiKey entry
          */
-        ByteBuffer body = ByteBuffer.allocate(18);
+        ByteBuffer body = ByteBuffer.allocate(4 + 2 + 4 + 2 + 2 + 2 + 4);
         body.putInt(correlationId);
         body.putShort(errorCode);
 
-        body.put((byte) 1);            // Array length = 1
-        body.putShort((short) 18);     // ApiKey
-        body.putShort((short) 0);      // MinVersion
-        body.putShort((short) 4);      // MaxVersion
+        body.putInt(1);               // array length = 1 (int32)
+        body.putShort((short) 18);    // ApiKey
+        body.putShort((short) 0);     // MinVersion
+        body.putShort((short) 4);     // MaxVersion
 
-        body.putInt(0);                // throttle_time_ms = 0
-        body.put((byte) 0);            // tagged_fields = 0
+        body.putInt(0);               // throttle_time_ms = 0
 
-        // Prevent extra/trailing bytes
         body.flip();
         byte[] responseBytes = new byte[body.remaining()];
         body.get(responseBytes);
@@ -99,10 +101,10 @@ public class KafkaServer {
 
     private byte[] buildErrorResponse(int correlationId) {
         // Minimal error frame for unknown API
-        ByteBuffer body = ByteBuffer.allocate(7);
+        ByteBuffer body = ByteBuffer.allocate(4 + 2 + 4); // correlationId + errorCode + array length
         body.putInt(correlationId);
         body.putShort((short) 44); // UNKNOWN_API_KEY
-        body.put((byte) 0);        // No ApiVersions entries
+        body.putInt(0);            // No ApiVersions entries
         body.flip();
         byte[] responseBytes = new byte[body.remaining()];
         body.get(responseBytes);
