@@ -1,14 +1,15 @@
 import common.ApiKeyEnum;
 import java.io.IOException;
-import java.math.BigInteger;
 import java.net.InetSocketAddress;
-import java.net.StandardSocketOptions;
 import java.nio.ByteBuffer;
 import java.nio.channels.SelectionKey;
 import java.nio.channels.Selector;
 import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Iterator;
+import java.util.List;
 
 public class Main {
 
@@ -20,11 +21,9 @@ public class Main {
   private static void nio() {
     final int port = 9092;
     try {
-      // Open first, then set options individually (avoid chained type narrowing)
       ServerSocketChannel server = ServerSocketChannel.open();
-      server.setOption(StandardSocketOptions.SO_REUSEADDR, true);
-      // server.setOption(StandardSocketOptions.SO_REUSEPORT, true); // optional, may not be supported everywhere
-      server.setOption(StandardSocketOptions.SO_RCVBUF, 1024);
+      // Avoid SO_* options to keep this JDK-agnostic and simple.
+      server.socket().setReuseAddress(true);
       server.bind(new InetSocketAddress(port));
       server.configureBlocking(false);
 
@@ -32,116 +31,92 @@ public class Main {
       server.register(selector, SelectionKey.OP_ACCEPT);
 
       while (true) {
-        if (selector.select(500) == 0) {
-          continue;
-        }
+        if (selector.select(500) == 0) continue;
 
-        Iterator<SelectionKey> iterator = selector.selectedKeys().iterator();
-        while (iterator.hasNext()) {
-          SelectionKey key = iterator.next();
-          iterator.remove(); // remove first to avoid re-processing
+        Iterator<SelectionKey> it = selector.selectedKeys().iterator();
+        while (it.hasNext()) {
+          SelectionKey key = it.next();
+          it.remove();
 
           try {
             if (key.isAcceptable()) {
               ServerSocketChannel ssc = (ServerSocketChannel) key.channel();
-              SocketChannel clientChannel = ssc.accept(); // can be null in non-blocking mode
-              if (clientChannel != null) {
-                clientChannel.configureBlocking(false);
-                clientChannel.register(selector, SelectionKey.OP_READ);
+              SocketChannel client = ssc.accept(); // may be null in non-blocking mode
+              if (client != null) {
+                client.configureBlocking(false);
+                client.register(selector, SelectionKey.OP_READ);
               }
             } else if (key.isReadable()) {
-              SocketChannel channel = (SocketChannel) key.channel();
-              if (!channel.isOpen()) continue;
+              SocketChannel ch = (SocketChannel) key.channel();
+              if (!ch.isOpen()) continue;
 
-              ByteBuffer buffer = ByteBuffer.allocate(2048);
-              int len = channel.read(buffer);
-              if (len == -1) {
-                // client closed the connection
-                channel.close();
-                continue;
-              }
-              if (len == 0) {
-                // no data this round
-                continue;
-              }
+              ByteBuffer buf = ByteBuffer.allocate(4096);
+              int n = ch.read(buf);
+              if (n == -1) { ch.close(); continue; }
+              if (n == 0) { continue; }
 
-              buffer.flip(); // make Buffer ready for reading
+              buf.flip();
 
               // Build response
-              final List<Byte> data = new ArrayList<>();
+              List<Byte> out = new ArrayList<>();
 
-              // message length placeholder (4 bytes)
-              fillBytes(data, (byte) 0, 4);
+              // Placeholder for frame length (4 bytes)
+              putN(out, 0, 4);
 
-              // correlationId: copy from request at offset 8 (4 bytes)
-              if (buffer.limit() >= 12) {
-                fillBytes(data, buffer, 8, 4);
+              // correlationId: copy 4 bytes from offset 8 if present, else 0
+              if (buf.limit() >= 12) {
+                copyBytes(out, buf, 8, 4);
               } else {
-                // fallback: correlationId = 0
-                fillBytes(data, 0, 4);
+                putN(out, 0, 4);
               }
 
-              // Parse apiKey & apiVersion as UNSIGNED short (big-endian)
-              if (buffer.limit() >= 8) {
-                int apiKey = Short.toUnsignedInt(buffer.getShort(4));
-                int apiVersion = (buffer.limit() >= 8) ? Short.toUnsignedInt(buffer.getShort(6)) : 0;
+              // Read apiKey/apiVersion if present
+              int apiKey = (buf.limit() >= 6) ? (buf.getShort(4) & 0xFFFF) : -1;
+              int apiVersion = (buf.limit() >= 8) ? (buf.getShort(6) & 0xFFFF) : 0;
 
-                switch (apiKey) {
-                  case 18: { // ApiVersions
-                    if (apiVersion < ApiKeyEnum.API_18.minVersion || apiVersion > ApiKeyEnum.API_18.maxVersion) {
-                      // error: UNSUPPORTED_VERSION (35)
-                      fillBytes(data, 35, 2);
-                    } else {
-                      // errorCode = 0
-                      fillBytes(data, 0, 2);
-                    }
+              if (apiKey == 18) { // ApiVersions
+                // errorCode
+                if (apiVersion < ApiKeyEnum.API_18.minVersion || apiVersion > ApiKeyEnum.API_18.maxVersion) {
+                  putShort(out, (short) 35); // UNSUPPORTED_VERSION
+                } else {
+                  putShort(out, (short) 0);
+                }
 
-                    // Number of API keys
-                    fillBytes(data, ApiKeyEnum.values().length + 1, 1);
+                // Flexible versions (v3+): compact array length = N + 1 (uvarint).
+                int nApis = ApiKeyEnum.values().length;
+                putUVarInt(out, nApis + 1);
 
-                    // List of (apiKey, minVersion, maxVersion, tagged-fields)
-                    Arrays.stream(ApiKeyEnum.values()).forEach(api -> {
-                      fillBytes(data, api.key, 2);
-                      fillBytes(data, api.minVersion, 2);
-                      fillBytes(data, api.maxVersion, 2);
-                      // tagged fields
-                      fillBytes(data, 0, 1);
-                    });
+                // Each element: apiKey, minVersion, maxVersion, tagged_fields (empty)
+                for (ApiKeyEnum api : ApiKeyEnum.values()) {
+                  putShort(out, (short) api.key);
+                  putShort(out, (short) api.minVersion);
+                  putShort(out, (short) api.maxVersion);
+                  putUVarInt(out, 0); // element tagged_fields (empty)
+                }
 
-                    if (apiVersion > 0) {
-                      // Throttle time (int32) — choose 1ms
-                      fillBytes(data, 1, 4);
-                      // tagged fields
-                      fillBytes(data, 0, 1);
-                    }
-                  } break;
-
-                  default: {
-                    // For other APIs: errorCode = 0 for now
-                    fillBytes(data, 0, 2);
-                  }
+                if (apiVersion > 0) {
+                  // throttle_time_ms (int32) present in v1+
+                  putInt(out, 1);
+                  // top-level tagged_fields (empty, flexible versions)
+                  putUVarInt(out, 0);
                 }
               } else {
-                // Not enough bytes to even read apiKey/apiVersion: respond with generic success (error=0)
-                fillBytes(data, 0, 2);
+                // Generic success (errorCode = 0) for unknown APIs so tests don’t crash
+                putShort(out, (short) 0);
               }
 
-              // Write response length at the start
-              ByteBuffer writeBuffer = ByteBuffer.allocate(data.size());
-              for (byte b : data) writeBuffer.put(b);
-              writeBuffer.putInt(0, data.size() - 4); // Kafka: first 4 bytes = size (not including itself)
-              writeBuffer.flip();
+              // Write size at start (Kafka length excludes the 4 length bytes)
+              ByteBuffer rsp = ByteBuffer.allocate(out.size());
+              for (byte b : out) rsp.put(b);
+              rsp.putInt(0, out.size() - 4);
+              rsp.flip();
 
-              while (writeBuffer.hasRemaining()) {
-                channel.write(writeBuffer);
+              while (rsp.hasRemaining()) {
+                ch.write(rsp);
               }
-              // keep connection open (Kafka clients may pipeline)
             }
           } catch (IOException e) {
-            // Close the channel on any IO problem to avoid busy loops
-            try {
-              key.channel().close();
-            } catch (IOException ignored) {}
+            try { key.channel().close(); } catch (IOException ignored) {}
           } catch (Exception e) {
             e.printStackTrace();
           }
@@ -153,36 +128,35 @@ public class Main {
     }
   }
 
-  private static void fillBytes(List<Byte> data, byte value, int len) {
-    for (int i = 0; i < len; i++) {
-      data.add(value);
-    }
-  }
+  // ---- helpers (big-endian, simple, no BigInteger) ----
 
-  private static void fillBytes(List<Byte> data, ByteBuffer buffer, int initPosition, int len) {
-    // Copy 'len' bytes from absolute position 'initPosition' if available
-    int oldPos = buffer.position();
-    int oldLimit = buffer.limit();
-    int end = initPosition + len;
-    if (end > oldLimit) {
-      // not enough bytes; pad with zeros
-      int available = Math.max(0, oldLimit - initPosition);
-      if (available > 0) {
-        buffer.position(initPosition);
-        for (int i = 0; i < available; i++) data.add(buffer.get());
-      }
-      for (int i = available; i < len; i++) data.add((byte) 0);
+  private static void copyBytes(List<Byte> out, ByteBuffer buf, int pos, int len) {
+    int oldPos = buf.position();
+    int limit = buf.limit();
+    int end = pos + len;
+    if (pos >= 0 && end <= limit) {
+      for (int i = pos; i < end; i++) out.add(buf.get(i));
     } else {
-      buffer.position(initPosition);
-      for (int i = 0; i < len; i++) data.add(buffer.get());
+      int available = Math.max(0, Math.min(limit, end) - Math.max(0, pos));
+      for (int i = 0; i < available; i++) out.add(buf.get(pos + i));
+      for (int i = available; i < len; i++) out.add((byte) 0);
     }
-    buffer.position(oldPos); // restore
+    buf.position(oldPos);
   }
 
-  private static void fillBytes(List<Byte> data, int value, int len) {
-    // Write big-endian, fixed width
-    for (int i = len - 1; i >= 0; i--) {
-      data.add((byte) ((value >> (8 * i)) & 0xFF));
+  private static void putN(List<Byte> out, int value, int len) {
+    for (int i = len - 1; i >= 0; i--) out.add((byte)((value >>> (8 * i)) & 0xFF));
+  }
+
+  private static void putInt(List<Byte> out, int value) { putN(out, value, 4); }
+  private static void putShort(List<Byte> out, short value) { putN(out, value & 0xFFFF, 2); }
+
+  // Unsigned VarInt (Kafka flexible types). For small values (< 128) this is one byte.
+  private static void putUVarInt(List<Byte> out, int value) {
+    while ((value & ~0x7F) != 0) {
+      out.add((byte)((value & 0x7F) | 0x80));
+      value >>>= 7;
     }
+    out.add((byte)(value & 0x7F));
   }
 }
