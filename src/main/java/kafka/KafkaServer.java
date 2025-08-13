@@ -16,7 +16,7 @@ public class KafkaServer {
         try (ServerSocket serverSocket = new ServerSocket(port)) {
             while (true) {
                 Socket clientSocket = serverSocket.accept();
-                handleClient(clientSocket); // For Serial Requests: keep reading from same connection
+                handleClient(clientSocket); // Serial Requests: handle same client until disconnect
             }
         }
     }
@@ -29,18 +29,18 @@ public class KafkaServer {
                 // Read request size (4 bytes)
                 byte[] sizeBytes = input.readNBytes(4);
                 if (sizeBytes.length < 4) {
-                    break; // client closed connection
+                    break; // Client closed connection
                 }
 
                 int requestSize = ByteBuffer.wrap(sizeBytes).getInt();
 
-                // Read full request
+                // Read request bytes
                 byte[] requestBytes = input.readNBytes(requestSize);
                 if (requestBytes.length < requestSize) {
-                    break; // incomplete read
+                    break; // Incomplete request
                 }
 
-                // Process request -> return response
+                // Process and get response
                 byte[] response = processRequest(requestBytes);
 
                 // Send size + response
@@ -59,23 +59,25 @@ public class KafkaServer {
         short apiVersion = buffer.getShort();
         int correlationId = buffer.getInt();
 
-        // We only handle ApiVersions request in this stage
-        if (apiKey == 18) { // ApiVersions key = 18
-            return buildApiVersionsResponse(correlationId);
+        if (apiKey == 18) { // ApiVersions
+            return buildApiVersionsResponse(correlationId, apiVersion);
         }
 
-        // Default empty response for unknown API
+        // Unknown API → empty response
         return new byte[0];
     }
 
-    private byte[] buildApiVersionsResponse(int correlationId) {
+    private byte[] buildApiVersionsResponse(int correlationId, short requestApiVersion) {
+        // Kafka ErrorCode 35 = UNSUPPORTED_VERSION
+        short errorCode = (requestApiVersion > 4) ? (short) 35 : (short) 0;
+
         ByteBuffer body = ByteBuffer.allocate(256);
 
         // CorrelationId
         body.putInt(correlationId);
 
-        // ErrorCode (short) = 0
-        body.putShort((short) 0);
+        // ErrorCode
+        body.putShort(errorCode);
 
         // ApiVersions array length = 1
         body.put((byte) 1);
