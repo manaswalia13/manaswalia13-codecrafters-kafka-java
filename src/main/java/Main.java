@@ -5,7 +5,7 @@ public class Main {
 
         try {
             System.out.println("Starting KafkaServer on port " + port + "...");
-            server.start(); // Runs in blocking mode
+            server.start();
         } catch (Exception e) {
             e.printStackTrace();
         }
