@@ -12,45 +12,43 @@ public class Main {
         try (ServerSocket serverSocket = new ServerSocket(port)) {
             serverSocket.setReuseAddress(true);
 
-            // Accept a single client (Serial Requests means one at a time)
             try (Socket clientSocket = serverSocket.accept()) {
                 InputStream in = clientSocket.getInputStream();
                 OutputStream out = clientSocket.getOutputStream();
 
                 while (true) {
-                    // First read 4 bytes to get request size
+                    // Read 4 bytes for request size
                     byte[] sizeBytes = in.readNBytes(4);
                     if (sizeBytes.length < 4) {
                         break; // client disconnected
                     }
-
                     int requestSize = ByteBuffer.wrap(sizeBytes).getInt();
 
-                    // Read the full request
+                    // Read the request body
                     byte[] requestBytes = in.readNBytes(requestSize);
                     if (requestBytes.length < requestSize) {
                         break; // client disconnected mid-request
                     }
 
-                    // Extract ApiVersion and CorrelationId
-                    byte[] apiVersion = new byte[2];
-                    System.arraycopy(requestBytes, 6, apiVersion, 0, 2);
+                    // Parse API key and version
+                    short apiKey = ByteBuffer.wrap(requestBytes, 0, 2).getShort();
+                    short apiVersion = ByteBuffer.wrap(requestBytes, 2, 2).getShort();
 
-                    byte[] correlationId = new byte[4];
-                    System.arraycopy(requestBytes, 8, correlationId, 0, 4);
+                    // Parse correlation ID (starts at byte 4 now)
+                    int correlationId = ByteBuffer.wrap(requestBytes, 4, 4).getInt();
 
-                    System.out.println("CorrelationId: " + ByteBuffer.wrap(correlationId).getInt());
+                    System.out.println("CorrelationId: " + correlationId);
 
-                    // Build response
-                    var messageSize = ByteBuffer.allocate(4).putInt(19).array();
+                    // Build ApiVersions response (length = 19 bytes)
+                    byte[] messageSize = ByteBuffer.allocate(4).putInt(19).array();
                     out.write(messageSize);
-                    out.write(correlationId);
+                    out.write(ByteBuffer.allocate(4).putInt(correlationId).array());
                     out.write(
-                        apiVersion[0] != 0 || apiVersion[1] > 4
+                        apiKey != 18 || apiVersion > 4
                             ? new byte[] {0, 35} // unsupported version
-                            : new byte[] {0, 0}  // supported version
+                            : new byte[] {0, 0}  // supported
                     );
-                    out.write(new byte[] {2, 00, 0x12, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0});
+                    out.write(new byte[] {2, 0x00, 0x12, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0});
                     out.flush();
                 }
             }
