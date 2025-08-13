@@ -19,30 +19,30 @@ public class Main {
 
                 while (true) {
                     byte[] sizeBytes = in.readNBytes(4);
-                    if (sizeBytes.length < 4) break; // client closed
+                    if (sizeBytes.length < 4) break; // connection closed
                     int size = ByteBuffer.wrap(sizeBytes).getInt();
 
                     byte[] body = in.readNBytes(size);
-                    if (body.length < size) break;
+                    if (body.length < size) break; // incomplete request
 
                     short apiKey = ByteBuffer.wrap(body, 0, 2).getShort();
                     short apiVersion = ByteBuffer.wrap(body, 2, 2).getShort();
                     int correlationId = ByteBuffer.wrap(body, 4, 4).getInt();
 
-                    System.out.println("ApiKey=" + apiKey + ", Version=" + apiVersion + ", CorrId=" + correlationId);
-
                     short errorCode = (apiKey != API_VERSIONS_KEY || apiVersion > MAX_SUPPORTED_VERSION)
                             ? (short) 35
                             : (short) 0;
 
-                    byte[] response = ByteBuffer.allocate(19)
-                            .putInt(15) // message body size (without this 4 bytes)
+                    // Build body (no size yet)
+                    byte[] bodyResponse = ByteBuffer.allocate(15)
                             .putInt(correlationId)
                             .putShort(errorCode)
                             .put(new byte[]{2, 0x00, 0x12, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0})
                             .array();
 
-                    out.write(response);
+                    // Now wrap with size prefix
+                    out.write(ByteBuffer.allocate(4).putInt(bodyResponse.length).array());
+                    out.write(bodyResponse);
                     out.flush();
                 }
             }
