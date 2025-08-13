@@ -2,153 +2,154 @@ import common.ApiKeyEnum;
 import java.io.IOException;
 import java.math.BigInteger;
 import java.net.InetSocketAddress;
-import java.net.ServerSocket;
-import java.net.Socket;
 import java.net.StandardSocketOptions;
 import java.nio.ByteBuffer;
 import java.nio.channels.SelectionKey;
 import java.nio.channels.Selector;
 import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
-import java.nio.charset.StandardCharsets;
 import java.util.*;
 
 public class Main {
 
   public static void main(String[] args) {
-    // You can use print statements as follows for debugging, they'll be visible
-    // when running tests.
     System.err.println("Logs from your program will appear here!");
-
-    // Uncomment this block to pass the first stage
-
-    /*ServerSocket serverSocket = null;
-    Socket clientSocket = null;
-    int port = 9092;
-    try {
-        serverSocket = new ServerSocket(port);
-        // Since the tester restarts your program quite often, setting
-    SO_REUSEADDR
-        // ensures that we don't run into 'Address already in use' errors
-        serverSocket.setReuseAddress(true);
-        // Wait for connection from client.
-        clientSocket = serverSocket.accept();
-    } catch (IOException e) {
-        System.out.println("IOException: " + e.getMessage());
-    } finally {
-        try {
-            if (clientSocket != null) {
-                clientSocket.close();
-            }
-        } catch (IOException e) {
-            System.out.println("IOException: " + e.getMessage());
-        }
-    }*/
     nio();
   }
+
   private static void nio() {
     final int port = 9092;
     try {
-      ServerSocketChannel server =
-          ServerSocketChannel.open()
-              .setOption(StandardSocketOptions.SO_REUSEADDR, true)
-              //.setOption(StandardSocketOptions.SO_REUSEPORT, true)
-              .setOption(StandardSocketOptions.SO_RCVBUF, 1024)
-              .bind(new InetSocketAddress(port));
+      // Open first, then set options individually (avoid chained type narrowing)
+      ServerSocketChannel server = ServerSocketChannel.open();
+      server.setOption(StandardSocketOptions.SO_REUSEADDR, true);
+      // server.setOption(StandardSocketOptions.SO_REUSEPORT, true); // optional, may not be supported everywhere
+      server.setOption(StandardSocketOptions.SO_RCVBUF, 1024);
+      server.bind(new InetSocketAddress(port));
       server.configureBlocking(false);
+
       Selector selector = Selector.open();
       server.register(selector, SelectionKey.OP_ACCEPT);
-      while (true) {
-        if (selector.select(500) > 0) {
-          Iterator<SelectionKey> iterator = selector.selectedKeys().iterator();
-          while (iterator.hasNext()) {
-            SelectionKey selectionKey = iterator.next();
-            switch (selectionKey.interestOps()) {
-            case SelectionKey.OP_ACCEPT: {
-              SocketChannel clientChannel =
-                  ((ServerSocketChannel)selectionKey.channel()).accept();
-              clientChannel.configureBlocking(false);
-              clientChannel.register(selector, SelectionKey.OP_READ);
-            } break;
-            case SelectionKey.OP_READ: {
-              SocketChannel channel = (SocketChannel)selectionKey.channel();
-              if (channel.isConnected()) {
-                ByteBuffer buffer = ByteBuffer.allocate(2048);
-                buffer.clear();
-                int len = channel.read(buffer);
-                if (len > 0) {
-                  final List<Byte> data = new ArrayList<>();
-                  // message length
-                  fillBytes(data, (byte)0, 4);
-                  // correlationId
-                  fillBytes(data, buffer, 8, 4);
 
-                  byte[] apiKey = new byte[2];
-                  // apiKey
-                  buffer.position(4);
-                  buffer.get(apiKey, 0, 2);
-                  BigInteger apiKeyNo = new BigInteger(apiKey);
-                  switch (apiKeyNo.intValue()) {
-                  case 18: {
-                    // ApiVersions
-                    buffer.position(6);
-                    byte[] apiVers = new byte[2];
-                    buffer.get(apiVers, 0, 2);
-                    byte apiVersion = new BigInteger(apiVers).byteValue();
-                    if (apiVersion < ApiKeyEnum.API_18.minVersion ||
-                        apiVersion > ApiKeyEnum.API_18.maxVersion) {
+      while (true) {
+        if (selector.select(500) == 0) {
+          continue;
+        }
+
+        Iterator<SelectionKey> iterator = selector.selectedKeys().iterator();
+        while (iterator.hasNext()) {
+          SelectionKey key = iterator.next();
+          iterator.remove(); // remove first to avoid re-processing
+
+          try {
+            if (key.isAcceptable()) {
+              ServerSocketChannel ssc = (ServerSocketChannel) key.channel();
+              SocketChannel clientChannel = ssc.accept(); // can be null in non-blocking mode
+              if (clientChannel != null) {
+                clientChannel.configureBlocking(false);
+                clientChannel.register(selector, SelectionKey.OP_READ);
+              }
+            } else if (key.isReadable()) {
+              SocketChannel channel = (SocketChannel) key.channel();
+              if (!channel.isOpen()) continue;
+
+              ByteBuffer buffer = ByteBuffer.allocate(2048);
+              int len = channel.read(buffer);
+              if (len == -1) {
+                // client closed the connection
+                channel.close();
+                continue;
+              }
+              if (len == 0) {
+                // no data this round
+                continue;
+              }
+
+              buffer.flip(); // make Buffer ready for reading
+
+              // Build response
+              final List<Byte> data = new ArrayList<>();
+
+              // message length placeholder (4 bytes)
+              fillBytes(data, (byte) 0, 4);
+
+              // correlationId: copy from request at offset 8 (4 bytes)
+              if (buffer.limit() >= 12) {
+                fillBytes(data, buffer, 8, 4);
+              } else {
+                // fallback: correlationId = 0
+                fillBytes(data, 0, 4);
+              }
+
+              // Parse apiKey & apiVersion as UNSIGNED short (big-endian)
+              if (buffer.limit() >= 8) {
+                int apiKey = Short.toUnsignedInt(buffer.getShort(4));
+                int apiVersion = (buffer.limit() >= 8) ? Short.toUnsignedInt(buffer.getShort(6)) : 0;
+
+                switch (apiKey) {
+                  case 18: { // ApiVersions
+                    if (apiVersion < ApiKeyEnum.API_18.minVersion || apiVersion > ApiKeyEnum.API_18.maxVersion) {
+                      // error: UNSUPPORTED_VERSION (35)
                       fillBytes(data, 35, 2);
                     } else {
-                      fillBytes(data, (byte)0, 2);
+                      // errorCode = 0
+                      fillBytes(data, 0, 2);
                     }
+
+                    // Number of API keys
                     fillBytes(data, ApiKeyEnum.values().length + 1, 1);
+
+                    // List of (apiKey, minVersion, maxVersion, tagged-fields)
                     Arrays.stream(ApiKeyEnum.values()).forEach(api -> {
                       fillBytes(data, api.key, 2);
                       fillBytes(data, api.minVersion, 2);
                       fillBytes(data, api.maxVersion, 2);
-                      // tag fields
+                      // tagged fields
                       fillBytes(data, 0, 1);
                     });
+
                     if (apiVersion > 0) {
-                      // fillBytes(data, (byte)0, 4);
+                      // Throttle time (int32) — choose 1ms
                       fillBytes(data, 1, 4);
-                      // tag fields
+                      // tagged fields
                       fillBytes(data, 0, 1);
                     }
                   } break;
+
                   default: {
-                    // error code
-                    fillBytes(data, (byte)0, 2);
-                  }
-                  }
-                  ByteBuffer writeBuffer = ByteBuffer.allocate(data.size());
-                  writeBuffer.position(0);
-                  data.forEach(writeBuffer::put);
-                  writeBuffer.putInt(0, data.size() - 4);
-                  /*writeBuffer.position(0);
-                  for(int i = 0; i < writeBuffer.capacity(); i++) {
-                      System.out.printf("%02X ", writeBuffer.get());
-                  }*/
-                  writeBuffer.position(0);
-                  while (writeBuffer.hasRemaining()) {
-                    channel.write(writeBuffer);
+                    // For other APIs: errorCode = 0 for now
+                    fillBytes(data, 0, 2);
                   }
                 }
-                // channel.close();
+              } else {
+                // Not enough bytes to even read apiKey/apiVersion: respond with generic success (error=0)
+                fillBytes(data, 0, 2);
               }
-            } break;
-            case SelectionKey.OP_WRITE: {
-            } break;
-            default: {
+
+              // Write response length at the start
+              ByteBuffer writeBuffer = ByteBuffer.allocate(data.size());
+              for (byte b : data) writeBuffer.put(b);
+              writeBuffer.putInt(0, data.size() - 4); // Kafka: first 4 bytes = size (not including itself)
+              writeBuffer.flip();
+
+              while (writeBuffer.hasRemaining()) {
+                channel.write(writeBuffer);
+              }
+              // keep connection open (Kafka clients may pipeline)
             }
-            }
-            iterator.remove();
+          } catch (IOException e) {
+            // Close the channel on any IO problem to avoid busy loops
+            try {
+              key.channel().close();
+            } catch (IOException ignored) {}
+          } catch (Exception e) {
+            e.printStackTrace();
           }
         }
       }
     } catch (Exception e) {
       e.printStackTrace();
-      System.out.printf("Exception: %s\n", e.getMessage());
+      System.out.printf("Exception: %s%n", e.getMessage());
     }
   }
 
@@ -158,27 +159,30 @@ public class Main {
     }
   }
 
-  private static void fillBytes(List<Byte> data, ByteBuffer buffer,
-                                int initPosition, int len) {
-    buffer.position(initPosition);
-    for (int i = 0; i < len; i++) {
-      data.add(buffer.get());
+  private static void fillBytes(List<Byte> data, ByteBuffer buffer, int initPosition, int len) {
+    // Copy 'len' bytes from absolute position 'initPosition' if available
+    int oldPos = buffer.position();
+    int oldLimit = buffer.limit();
+    int end = initPosition + len;
+    if (end > oldLimit) {
+      // not enough bytes; pad with zeros
+      int available = Math.max(0, oldLimit - initPosition);
+      if (available > 0) {
+        buffer.position(initPosition);
+        for (int i = 0; i < available; i++) data.add(buffer.get());
+      }
+      for (int i = available; i < len; i++) data.add((byte) 0);
+    } else {
+      buffer.position(initPosition);
+      for (int i = 0; i < len; i++) data.add(buffer.get());
     }
+    buffer.position(oldPos); // restore
   }
 
   private static void fillBytes(List<Byte> data, int value, int len) {
-    byte[] bytes = BigInteger.valueOf(value).toByteArray();
-    if (bytes.length >= len) {
-      for (int i = bytes.length - len; i < bytes.length; i++) {
-        data.add(bytes[i]);
-      }
-    } else {
-      for (int i = 0, c = len - bytes.length; i < c; i++) {
-        data.add((byte)0);
-      }
-      for (byte val : bytes) {
-        data.add(val);
-      }
+    // Write big-endian, fixed width
+    for (int i = len - 1; i >= 0; i--) {
+      data.add((byte) ((value >> (8 * i)) & 0xFF));
     }
   }
 }
