@@ -18,29 +18,41 @@ public class Main {
                 OutputStream out = clientSocket.getOutputStream();
 
                 while (true) {
+                    // Read size prefix (4 bytes)
                     byte[] sizeBytes = in.readNBytes(4);
-                    if (sizeBytes.length < 4) break; // connection closed
+                    if (sizeBytes.length < 4) {
+                        break; // client closed connection
+                    }
+
                     int size = ByteBuffer.wrap(sizeBytes).getInt();
 
+                    // Read request body
                     byte[] body = in.readNBytes(size);
-                    if (body.length < size) break; // incomplete request
+                    if (body.length < size) {
+                        break; // incomplete request
+                    }
 
+                    // Parse API key, version, correlation ID
                     short apiKey = ByteBuffer.wrap(body, 0, 2).getShort();
                     short apiVersion = ByteBuffer.wrap(body, 2, 2).getShort();
                     int correlationId = ByteBuffer.wrap(body, 4, 4).getInt();
 
-                    short errorCode = (apiKey != API_VERSIONS_KEY || apiVersion > MAX_SUPPORTED_VERSION)
-                            ? (short) 35
-                            : (short) 0;
+                    // Decide error code
+                    short errorCode;
+                    if (apiKey == API_VERSIONS_KEY && apiVersion <= MAX_SUPPORTED_VERSION) {
+                        errorCode = 0;
+                    } else {
+                        errorCode = 35;
+                    }
 
-                    // Build body (no size yet)
+                    // Build response body (correlationId + errorCode + fixed bytes)
                     byte[] bodyResponse = ByteBuffer.allocate(15)
                             .putInt(correlationId)
                             .putShort(errorCode)
                             .put(new byte[]{2, 0x00, 0x12, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0})
                             .array();
 
-                    // Now wrap with size prefix
+                    // Write size prefix + body
                     out.write(ByteBuffer.allocate(4).putInt(bodyResponse.length).array());
                     out.write(bodyResponse);
                     out.flush();
