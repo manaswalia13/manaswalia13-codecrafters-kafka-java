@@ -1,3 +1,5 @@
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
@@ -28,10 +30,10 @@ public class Main {
             DataOutputStream out = new DataOutputStream(clientSocket.getOutputStream())
         ) {
             while (true) {
-                // 1. Read request length (Kafka requests start with a 4-byte size prefix)
                 int requestSize;
+
                 try {
-                    requestSize = in.readInt();
+                    requestSize = in.readInt(); // 4-byte size prefix
                 } catch (IOException eof) {
                     // client closed connection
                     break;
@@ -40,9 +42,13 @@ public class Main {
                 byte[] requestBytes = new byte[requestSize];
                 in.readFully(requestBytes);
 
-                // 2. For now, always send back an ApiVersions response (dummy)
-                byte[] responseBytes = buildApiVersionsResponse();
+                // Parse correlation_id from request
+                int correlationId = extractCorrelationId(requestBytes);
 
+                // Build minimal ApiVersions response
+                byte[] responseBytes = buildApiVersionsResponse(correlationId);
+
+                // Send length-prefixed response
                 out.writeInt(responseBytes.length);
                 out.write(responseBytes);
                 out.flush();
@@ -52,9 +58,32 @@ public class Main {
         }
     }
 
-    // TODO: Replace with real ApiVersions response for later stages
-    private static byte[] buildApiVersionsResponse() {
-        // Placeholder minimal response (empty)
-        return new byte[0];
+    private static int extractCorrelationId(byte[] requestBytes) throws IOException {
+        try (DataInputStream reqIn = new DataInputStream(new ByteArrayInputStream(requestBytes))) {
+            short apiKey = reqIn.readShort();      // 2 bytes
+            short apiVersion = reqIn.readShort();  // 2 bytes
+            int correlationId = reqIn.readInt();   // 4 bytes
+            return correlationId;
+        }
+    }
+
+    private static byte[] buildApiVersionsResponse(int correlationId) throws IOException {
+        ByteArrayOutputStream byteStream = new ByteArrayOutputStream();
+        DataOutputStream out = new DataOutputStream(byteStream);
+
+        // === Response Header ===
+        out.writeInt(correlationId); // correlation_id
+
+        // === Response Body ===
+        out.writeShort(0); // error_code = 0 (success)
+
+        // api_versions array: empty (0 entries)
+        out.writeInt(0);
+
+        // throttle_time_ms
+        out.writeInt(0);
+
+        out.flush();
+        return byteStream.toByteArray();
     }
 }
