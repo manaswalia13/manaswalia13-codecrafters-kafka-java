@@ -45,7 +45,7 @@ public class Main {
                 // Parse correlation_id from request
                 int correlationId = extractCorrelationId(requestBytes);
 
-                // Build minimal ApiVersions response
+                // Build minimal valid ApiVersions response
                 byte[] responseBytes = buildApiVersionsResponse(correlationId);
 
                 // Send length-prefixed response
@@ -77,8 +77,11 @@ public class Main {
         // === Response Body ===
         out.writeShort(0); // error_code = 0 (success)
 
-        // api_versions array: empty (0 entries)
-        out.writeInt(0);
+        // api_versions array: length = 1
+        out.writeInt(1);
+        out.writeShort(18); // api_key = 18 (ApiVersions)
+        out.writeShort(0);  // min_version
+        out.writeShort(3);  // max_version
 
         // throttle_time_ms
         out.writeInt(0);
